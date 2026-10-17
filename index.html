@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandbox - OPFS Edition</title>
+</head>
+<body>
+<h2>Sandbox Local (Sem Nuvem) - OPFS</h2>
+<button id="salvar">1. CELULAR: Escolher .EXE e salvar no OPFS</button>
+<button id="rodar">2. PC/CELULAR: Rodar .EXE do OPFS</button>
+<div id="log"></div>
+<canvas id="screen"></canvas>
+
+<script>
+const log = (m) => document.getElementById('log').innerHTML += m + "<br>";
+
+async function getOPFS() {
+  const root = await navigator.storage.getDirectory();
+  return await root.getDirectoryHandle("sandbox", {create: true});
+}
+
+// BOTÃO 1 - HOST - Faz o que tu inventou
+document.getElementById('salvar').onclick = async () => {
+  const [fileHandle] = await window.showOpenFilePicker();
+  const file = await fileHandle.getFile();
+  const opfsRoot = await getOPFS();
+  const novo = await opfsRoot.getFileHandle(file.name, {create: true});
+  const w = await novo.createWritable();
+  await w.write(file);
+  await w.close();
+  log(`✅ ${file.name} salvo no OPFS! Pode apagar do celular agora. Continua na sandbox.`);
+};
+
+// BOTÃO 2 - PLAYER - Roda do OPFS
+document.getElementById('rodar').onclick = async () => {
+  const opfsRoot = await getOPFS();
+  for await (let name of opfsRoot.keys()) {
+    log(`Achado no OPFS: ${name}`);
+    // Aqui entra o v86 pra rodar o exe que tá no OPFS
+  }
+  log("Para rodar de verdade, integra com o v86 que te mandei antes.");
+};
+</script>
+</body>
+</html>
