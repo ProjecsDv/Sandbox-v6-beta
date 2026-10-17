@@ -2,44 +2,265 @@
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sandbox - OPFS Edition</title>
+<title>Sandbox - Host / Sala</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; padding: 16px; max-width: 600px; margin: auto; }
+  button { width: 100%; padding: 12px; margin: 6px 0; background: #222; color: #fff; border: 1px solid #444; cursor: pointer; }
+  button.primary { background: #eee; color: #111; font-weight: bold; }
+  button.danger { border-color: #a33; color: #f88; }
+  input { width: 100%; padding: 12px; margin: 6px 0; background: #000; color: #fff; border: 1px solid #444; box-sizing: border-box; font-family: monospace; letter-spacing: 4px; text-align: center; font-size: 20px; }
+  #log { margin-top: 12px; border: 1px solid #333; padding: 10px; min-height: 80px; background: #000; white-space: pre-wrap; font-size: 13px; }
+  #progress { height: 3px; background: #fff; width: 0%; }
+  .hidden { display: none; }
+  .row { display: flex; gap: 8px; }
+  .row button { flex: 1; }
+</style>
 </head>
 <body>
-<h2>Sandbox Local (Sem Nuvem) - OPFS</h2>
-<button id="salvar">1. CELULAR: Escolher .EXE e salvar no OPFS</button>
-<button id="rodar">2. PC/CELULAR: Rodar .EXE do OPFS</button>
+
+<h3 id="title">Sandbox - Escolha o modo</h3>
+<div id="progress"></div>
+
+<div id="menu">
+  <button id="btnModeHost" class="primary">HOST - Mandar arquivos do meu celular/PC</button>
+  <button id="btnModeSala">SALA - Entrar com codigo em outro aparelho</button>
+</div>
+
+<div id="hostView" class="hidden">
+  <p>Codigo da sala: <b id="roomCode" style="font-size:24px; letter-spacing:6px;">----</b></p>
+  <button id="btnSave">Selecionar EXE e salvar no OPFS</button>
+  <button id="btnList">Listar arquivos locais</button>
+  <button id="btnShare">Enviar arquivos para quem entrou na sala</button>
+  <button id="btnClear" class="danger">Limpar tudo</button>
+  <button id="btnBack1">Voltar</button>
+</div>
+
+<div id="salaView" class="hidden">
+  <p>Digite o codigo da sala do HOST:</p>
+  <input id="inputCode" placeholder="0000" maxlength="6">
+  <button id="btnJoin" class="primary">Entrar na sala</button>
+  <button id="btnListRemote">Listar arquivos recebidos</button>
+  <button id="btnClear2" class="danger">Limpar recebidos</button>
+  <button id="btnBack2">Voltar</button>
+</div>
+
 <div id="log"></div>
-<canvas id="screen"></canvas>
 
 <script>
-const log = (m) => document.getElementById('log').innerHTML += m + "<br>";
+const logEl = document.getElementById('log');
+const progressEl = document.getElementById('progress');
 
-async function getOPFS() {
+function log(t){ logEl.textContent += t + "\n"; }
+function setProgress(p){ progressEl.style.width = p + "%"; }
+function show(id){ document.getElementById(id).classList.remove('hidden'); }
+function hide(id){ document.getElementById(id).classList.add('hidden'); }
+
+let opfsRootCache = null;
+async function getSandboxDir(){
+  if(opfsRootCache) return opfsRootCache;
   const root = await navigator.storage.getDirectory();
-  return await root.getDirectoryHandle("sandbox", {create: true});
+  opfsRootCache = await root.getDirectoryHandle("sandbox", {create:true});
+  return opfsRootCache;
 }
 
-// BOTÃO 1 - HOST - Faz o que tu inventou
-document.getElementById('salvar').onclick = async () => {
-  const [fileHandle] = await window.showOpenFilePicker();
-  const file = await fileHandle.getFile();
-  const opfsRoot = await getOPFS();
-  const novo = await opfsRoot.getFileHandle(file.name, {create: true});
-  const w = await novo.createWritable();
-  await w.write(file);
-  await w.close();
-  log(`✅ ${file.name} salvo no OPFS! Pode apagar do celular agora. Continua na sandbox.`);
+async function getFileHash(file){
+  const sample = await file.slice(0, 1024*1024).arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", sample);
+  return [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,"0")).join("").slice(0,8);
+}
+
+// --- NAVEGACAO ---
+let currentRoomCode = null;
+let peerConn = null;
+
+document.getElementById("btnModeHost").onclick = () => {
+  hide("menu"); show("hostView");
+  document.getElementById("title").textContent = "Modo HOST";
+  currentRoomCode = Math.floor(1000 + Math.random()*9000).toString();
+  document.getElementById("roomCode").textContent = currentRoomCode;
+  log("Sala HOST criada: " + currentRoomCode);
+  log("No outro aparelho, escolha SALA e digite esse codigo");
+  initHostConnection(currentRoomCode);
 };
 
-// BOTÃO 2 - PLAYER - Roda do OPFS
-document.getElementById('rodar').onclick = async () => {
-  const opfsRoot = await getOPFS();
-  for await (let name of opfsRoot.keys()) {
-    log(`Achado no OPFS: ${name}`);
-    // Aqui entra o v86 pra rodar o exe que tá no OPFS
-  }
-  log("Para rodar de verdade, integra com o v86 que te mandei antes.");
+document.getElementById("btnModeSala").onclick = () => {
+  hide("menu"); show("salaView");
+  document.getElementById("title").textContent = "Modo SALA";
+  log("Digite o codigo do HOST para conectar");
 };
+
+function goMenu(){
+  hide("hostView"); hide("salaView"); show("menu");
+  document.getElementById("title").textContent = "Sandbox - Escolha o modo";
+  logEl.textContent = "";
+  if(peerConn) peerConn.close();
+}
+document.getElementById("btnBack1").onclick = goMenu;
+document.getElementById("btnBack2").onclick = goMenu;
+
+// --- HOST: SALVAR ---
+document.getElementById("btnSave").onclick = async () => {
+  try{
+    const [fh] = await window.showOpenFilePicker();
+    const file = await fh.getFile();
+    const dir = await getSandboxDir();
+    const hash = await getFileHash(file);
+    const name = hash + "_" + file.name;
+
+    try{ await dir.getFileHandle(name); log("Ja existe: " + name); return; }catch{}
+
+    const est = await navigator.storage.estimate();
+    if(file.size > (est.quota - est.usage)){ log("Sem espaco no host"); return; }
+    await navigator.storage.persist();
+
+    const dest = await dir.getFileHandle(name, {create:true});
+    const w = await dest.createWritable();
+    const chunkSize = 4*1024*1024;
+    let off = 0;
+    while(off < file.size){
+      const chunk = file.slice(off, off+chunkSize);
+      await w.write({type:"write", position:off, data:chunk});
+      off += chunkSize;
+      setProgress((off/file.size)*100);
+      if(off % (20*1024*1024) === 0) await new Promise(r=>setTimeout(r,0));
+    }
+    await w.close();
+    setProgress(100);
+    log("Salvo local: " + name);
+    setTimeout(()=>setProgress(0), 500);
+  }catch(e){ if(e.name!=="AbortError") log("Erro: "+e.message); }
+};
+
+document.getElementById("btnList").onclick = async () => {
+  const dir = await getSandboxDir();
+  logEl.textContent = "";
+  let empty = true;
+  for await(const [name, h] of dir.entries()){
+    const f = await h.getFile();
+    log(name + " - " + (f.size/1024/1024).toFixed(1) + " MB");
+    empty = false;
+  }
+  if(empty) log("Vazio");
+};
+
+document.getElementById("btnClear").onclick = async () => {
+  if(!confirm("Apagar tudo?")) return;
+  const dir = await getSandboxDir();
+  const tasks = [];
+  for await(const n of dir.keys()) tasks.push(dir.removeEntry(n));
+  await Promise.all(tasks);
+  log("Tudo apagado");
+};
+
+// --- CONEXAO P2P SIMPLES (WebRTC via servidor publico, dados nao passam por nuvem) ---
+let dataChannel = null;
+
+function initHostConnection(code){
+  // Usa servidor publico so pra sinalizacao, o arquivo vai direto P2P
+  const pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+  peerConn = pc;
+  dataChannel = pc.createDataChannel("files");
+  setupChannel(dataChannel, true);
+
+  pc.onicecandidate = e => {
+    if(e.candidate) {
+      localStorage.setItem("offer_"+code, JSON.stringify(pc.localDescription));
+    }
+  };
+
+  pc.createOffer().then(o => pc.setLocalDescription(o));
+  log("Aguardando alguem entrar com codigo " + code + "...");
+
+  // polling simples pra sala sem servidor proprio
+  const interval = setInterval(async ()=>{
+    const answer = localStorage.getItem("answer_"+code);
+    if(answer && pc.signalingState !== "stable"){
+      await pc.setRemoteDescription(JSON.parse(answer));
+      clearInterval(interval);
+      log("Conectado com a sala");
+    }
+  }, 1000);
+}
+
+document.getElementById("btnJoin").onclick = async () => {
+  const code = document.getElementById("inputCode").value.trim();
+  if(!code){ log("Digite o codigo"); return; }
+
+  const offerStr = localStorage.getItem("offer_"+code);
+  if(!offerStr){ log("Sala nao encontrada. O HOST precisa criar primeiro no mesmo Wi-Fi/rede"); return; }
+
+  const pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+  peerConn = pc;
+
+  pc.ondatachannel = e => {
+    dataChannel = e.channel;
+    setupChannel(dataChannel, false);
+  };
+
+  pc.onicecandidate = e => {
+    if(e.candidate){
+      localStorage.setItem("answer_"+code, JSON.stringify(pc.localDescription));
+    }
+  };
+
+  await pc.setRemoteDescription(JSON.parse(offerStr));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  log("Entrando na sala " + code + "...");
+};
+
+function setupChannel(ch, isHost){
+  ch.binaryType = "arraybuffer";
+  ch.onopen = () => log(isHost ? "SALA conectada, pode enviar" : "Conectado ao HOST, pronto para receber");
+  ch.onmessage = async e => {
+    // Recebendo arquivo
+    if(typeof e.data === "string" && e.data.startsWith("META:")){
+      const meta = JSON.parse(e.data.slice(5));
+      ch._nextFile = meta;
+      ch._buffer = [];
+      ch._received = 0;
+      log("Recebendo: " + meta.name);
+    } else {
+      ch._buffer.push(e.data);
+      ch._received += e.data.byteLength;
+      setProgress((ch._received / ch._nextFile.size)*100);
+      if(ch._received >= ch._nextFile.size){
+        const blob = new Blob(ch._buffer);
+        const dir = await getSandboxDir();
+        const dest = await dir.getFileHandle(ch._nextFile.name, {create:true});
+        const w = await dest.createWritable();
+        await w.write(blob);
+        await w.close();
+        log("Recebido e salvo: " + ch._nextFile.name);
+        setProgress(0);
+      }
+    }
+  };
+}
+
+document.getElementById("btnShare").onclick = async () => {
+  if(!dataChannel || dataChannel.readyState !== "open"){ log("Ninguem na sala ainda"); return; }
+  const dir = await getSandboxDir();
+  for await(const [name, handle] of dir.entries()){
+    const file = await handle.getFile();
+    dataChannel.send("META:" + JSON.stringify({name, size:file.size}));
+    const chunkSize = 64*1024;
+    let off = 0;
+    while(off < file.size){
+      const chunk = await file.slice(off, off+chunkSize).arrayBuffer();
+      dataChannel.send(chunk);
+      off += chunkSize;
+      setProgress((off/file.size)*100);
+      await new Promise(r=>setTimeout(r,0));
+    }
+    log("Enviado: " + name);
+  }
+  setProgress(0);
+};
+
+document.getElementById("btnListRemote").onclick = document.getElementById("btnList").onclick;
+document.getElementById("btnClear2").onclick = document.getElementById("btnClear").onclick;
 </script>
+
 </body>
 </html>
